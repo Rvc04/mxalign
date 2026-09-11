@@ -28,7 +28,6 @@ class Metric():
             ds = self._rechunk(ds)
         kwarg_ds = {self._kwarg_ds: ds}
         return self._func(**kwarg_ds)
-
     
     def _rechunk(self, ds):
         if self._dim is None:
