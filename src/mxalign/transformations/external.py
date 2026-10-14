@@ -18,17 +18,28 @@ def _resolve_function(func_path):
     import importlib
 
     module_path, func_name = func_path.rsplit(".", 1)
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError as e:
-        raise ImportError(
-            f"Could not import module '{module_path}' required for transform '{func_path}'. "
-            f"Make sure it is installed. Original error: {e}"
-        )
+
+    # Local functions defined in metrics.py
+    if module_path == "metrics":
+        module = importlib.import_module("..metrics", package=__package__)
+
+    # External functions
+    else:
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as e:
+            raise ImportError(
+                f"Could not import module '{module_path}' required for "
+                f"transform '{func_path}'. Make sure it is installed. "
+                f"Original error: {e}"
+            ) from e
+
     try:
         return getattr(module, func_name)
-    except AttributeError:
+    except AttributeError as e:
         raise AttributeError(
             f"Module '{module_path}' has no function '{func_name}'. "
             f"Check the function name in your config."
-        )
+        ) from e
+
+

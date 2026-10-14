@@ -4,7 +4,8 @@ import numpy as np
 import dask.array as dda
 import xarray as xr
 
-from scipy.spatial import Delaunay
+from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import Delaunay, cKDTree
 from scipy.sparse import csr_matrix
 
 from .base import BaseInterpolator
@@ -23,10 +24,8 @@ class DelaunayInterpolator(BaseInterpolator):
         super().__init__(target_dataset, **options)
         method = self.options.get("method", "linear")
         self._W_cache = {}  # keyed by source grid hash
-        if method != "linear":
-            raise ValueError(
-                f"Method: {method}. Delaunay interpolation only supports linear interpolation"
-            )
+        if  method != "linear":
+            raise ValueError(f"Method: {method}. Delaunay interpolation only supports linear interpolation")
 
     def _get_weights(self, source_points, target_points):
         key = (
@@ -43,26 +42,60 @@ class DelaunayInterpolator(BaseInterpolator):
 
     def _interpolate(self, source_dataset):
         if "grid_index" not in source_dataset.dims:
-            raise NotImplementedError(
-                "Delaunay interpolation currently only supports stacked grids"
-            )
+            raise NotImplementedError("Delaunay interpolation currently only supports stacked grids")
 
         if "latitude" in source_dataset.dims:
             lon_grid, lat_grid = np.meshgrid(
-                source_dataset["longitude"].values, source_dataset["latitude"].values
+                source_dataset["longitude"].values,
+                source_dataset["latitude"].values
             )
-            source_points = np.column_stack((lat_grid.ravel(), lon_grid.ravel()))
+            src_lat = lat_grid.ravel()
+            src_lon = lon_grid.ravel()
         else:
-            source_points = np.column_stack(
-                (source_dataset["latitude"].values, source_dataset["longitude"].values)
-            )
+            src_lat = source_dataset["latitude"].values
+            src_lon = source_dataset["longitude"].values
 
+        # Normalize longitudes to [-180, 180] so source and target are in the same range
+        src_lon = np.where(src_lon > 180, src_lon - 360, src_lon)
+        source_points = np.column_stack((src_lat, src_lon))
+
+        tgt_lon = np.where(self.target_dataset["longitude"].values > 180,
+                           self.target_dataset["longitude"].values - 360,
+                           self.target_dataset["longitude"].values)
         target_points = np.column_stack(
-            (
-                self.target_dataset["latitude"].values,
-                self.target_dataset["longitude"].values,
-            )
+            (np.atleast_1d(self.target_dataset["latitude"].values), np.atleast_1d(tgt_lon))
         )
+
+        # Remove target points outside the source grid convex hull.
+        triangulation = Delaunay(source_points)
+        simplex_indices = triangulation.find_simplex(target_points)
+        outside_mask = simplex_indices == -1
+
+        if outside_mask.any():
+            print(f"{outside_mask.sum()}/{len(target_points)} target points are outside the source grid and are removed.")
+            inside_mask = ~outside_mask
+            self.target_dataset = self.target_dataset.isel(point_index=inside_mask)
+            target_points = target_points[inside_mask]
+
+        # Distance check: remove stations farther than max_distance km from any source point.
+        # This is the ultimate guard against extrapolation at domain edges.
+        max_distance = self.options.get("max_distance", None)
+        if max_distance is not None and len(target_points) > 0:
+            tree = cKDTree(source_points)
+            _, nn_idx = tree.query(target_points)
+            nn = source_points[nn_idx]
+            lat1, lon1 = np.radians(target_points[:, 0]), np.radians(target_points[:, 1])
+            lat2, lon2 = np.radians(nn[:, 0]), np.radians(nn[:, 1])
+            a = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
+            dist_km = 2 * 6371.0 * np.arcsin(np.sqrt(a))
+            far_mask = dist_km > max_distance
+            if far_mask.any():
+                print(f"Extra check with max_distance: {far_mask.sum()}/{len(target_points)} target points are farther than {max_distance} km from the nearest source point and are removed.")
+                close_mask = ~far_mask
+                self.target_dataset = self.target_dataset.isel(point_index=close_mask)
+                target_points = target_points[close_mask]
+
+        print(f"{len(target_points)}/{len(outside_mask)} target points are kept.")
 
         # Compute triangulation and sparse weight matrix ONCE, shared across all variables
         W = self._get_weights(source_points, target_points)
@@ -142,9 +175,7 @@ def _build_weight_matrix(
     return W
 
 
-def interpolate_da(
-    da: xr.DataArray, W: csr_matrix, target_points: np.ndarray
-) -> xr.DataArray:
+def interpolate_da(da: xr.DataArray, W: csr_matrix, target_points: np.ndarray) -> xr.DataArray:
     n_target = len(target_points)
     leading_dims = da.dims[:-1]
 
@@ -176,9 +207,9 @@ def interpolate_da(
     tmp = dda.empty(shape=shape_tmp, chunks=chunks_tmp, dtype=da.dtype)
     tmp = xr.DataArray(
         tmp,
-        dims=leading_dims + ("point_index",),
-        coords={d: da.coords[d].load() for d in leading_dims},
-    )
+        dims=leading_dims + ("point_index", ),
+        coords={d: da.coords[d].load() for d in leading_dims} 
+        )
 
     # Drop coords tied to grid_index to avoid dimension mismatch in map_blocks
     spatial_coords = [c for c in da.coords if "grid_index" in da[c].dims]
@@ -198,9 +229,7 @@ def interpolate_block(
 ) -> xr.DataArray:
     data = block.values  # shape = (.., npoints)
     original_shape = data.shape[:-1]
-    data_flat = data.reshape(
-        -1, data.shape[-1]
-    )  # shape = (ndim1 * ndim2 * ... , npoints)
+    data_flat = data.reshape(-1, data.shape[-1]) # shape = (ndim1 * ndim2 * ... , npoints)
 
     # Identify NaN source points
     nan_mask = np.isnan(data_flat)  # (nleading, n_source)
@@ -216,3 +245,7 @@ def interpolate_block(
     new_dims = block.dims[:-1] + ("point_index",)
     new_coords = {dim: block.coords[dim] for dim in block.dims[:-1]}
     return xr.DataArray(interpolated, dims=new_dims, coords=new_coords)
+
+
+
+

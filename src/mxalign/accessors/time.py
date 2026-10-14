@@ -146,21 +146,19 @@ def _align_observation_forecast(ds_observation, ds_forecast, only_common=False):
         )
     if ds_forecast_cut.valid_time.max().values > ds_observation.valid_time.max().values:
         # The forecast time-step/lead times might not always align with the maximum observation time
-        valid_diff = (
-            ds_forecast_cut["valid_time"] - (ds_observation["valid_time"].max())
-        ).isel(lead_time=-1)
-        last_valid_index = (
-            np.abs(valid_diff.where(valid_diff <= 0, drop=True)).argmin().values
-        )
-        max_reference_time = ds_forecast_cut.isel(reference_time=last_valid_index)[
-            "reference_time"
-        ].values
+        valid_diff = (ds_forecast_cut["valid_time"]-(ds_observation["valid_time"].max())).isel(lead_time=-1)
+        last_valid_index = int(np.abs(valid_diff.where(valid_diff<=0, drop=True)).argmin(dim="reference_time").values)
+        max_reference_time = ds_forecast_cut.isel(reference_time=last_valid_index)["reference_time"].values
 
         # max_reference_time = ds_observation.valid_time.max().values - (ds_forecast_cut.lead_time.max().values - shift)
         ds_forecast_cut = ds_forecast_cut.sel(
             reference_time=slice(None, max_reference_time)
         )
 
+    # Reindex obs to cover all forecast valid_times (NaN for missing obs),
+    # then do the 2D sel — avoids KeyError when obs has gaps.
+    flat_valid_times = np.unique(ds_forecast_cut.valid_time.values.ravel())
+    ds_observation = ds_observation.reindex(valid_time=flat_valid_times)
     ds_observation_aligned = ds_observation.sel(valid_time=ds_forecast_cut.valid_time)
     ds_observation_aligned = ds_observation_aligned.transpose(
         "reference_time", "lead_time", ...

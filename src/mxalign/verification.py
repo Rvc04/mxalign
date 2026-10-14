@@ -8,6 +8,8 @@ class Metric:
         func = _resolve_function(func_path)
         self._is_xskillscore = func.__module__.startswith("xskillscore")
         self._dim = kwargs.get("dim", None)
+        if isinstance(self._dim, list):
+            self._dim = list(self._dim)  # defensive copy
 
         kwarg_ref = {}
         kwarg_ds = []
@@ -31,11 +33,13 @@ class Metric:
             ds = self._rechunk(ds)
         kwarg_ds = {self._kwarg_ds: ds}
         return self._func(**kwarg_ds)
-
+    
     def _rechunk(self, ds):
         if self._dim is None:
             return ds
-        dim = [self._dim] if isinstance(self._dim, str) else self._dim
+        dim = [self._dim] if isinstance(self._dim, str) else list(self._dim)
+        if 'member' in ds.dims:
+            dim.append('member')
         dim_other = [d for d in ds.dims if d not in dim]
         chunks = {d: -1 for d in dim}
         for d in dim_other:

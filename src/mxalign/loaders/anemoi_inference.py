@@ -5,11 +5,14 @@ from .registry import register_loader
 from ..properties.properties import Space, Time, Uncertainty
 from .base import BaseLoader
 
-DEFAULTS_NETCDF = {"chunks": "auto", "engine": "h5netcdf", "parallel": True}
+import xarray as xr
 
-DEFAULTS_ZARR = {
-    "chunks": "auto",
-    "storage_options": {"anon": True},
+
+DEFAULTS = {
+    "engine": "h5netcdf",
+    "parallel": True,
+    "combine": "nested",
+    "concat_dim": "reference_time",
 }
 
 
@@ -19,85 +22,248 @@ class AnemoiInferenceLoader(BaseLoader):
 
     space = Space.GRID
     time = Time.FORECAST
-    uncertainty = Uncertainty.DETERMINISTIC
+
+    def __init__(
+        self,
+        files,
+        variables=None,
+        grid_mapping=None,
+        ens_size=None,
+        **kwargs
+    ):
+        super().__init__(
+            files,
+            variables,
+            grid_mapping,
+            **kwargs
+        )
+
+        # Validate ens_size if provided
+        if ens_size is not None:
+            if not isinstance(ens_size, int) or ens_size < 1:
+                raise ValueError(
+                    f"ens_size must be a positive integer, got {ens_size!r}"
+                )
+        self.ens_size = ens_size
+
+        # Determine uncertainty based on ens_size
+        self.uncertainty = (
+            Uncertainty.ENSEMBLE
+            if ens_size is not None and ens_size > 1
+            else Uncertainty.DETERMINISTIC
+        )
 
     def _load(self):
 
-        kwargs = self.kwargs.copy()
+        files = (
+            [self.files]
+            if isinstance(self.files, str)
+            else self.files
+        )
 
-        if isinstance(self.files, str):
-            if Path(self.files).suffix.lower() == ".zarr":
-                files = self.files
+        if not files:
+            raise ValueError("No files provided.")
 
-                for k, v in DEFAULTS_ZARR.items():
-                    kwargs[k] = self.kwargs.get(k, v)
+        if self.ens_size is not None and self.ens_size > 1:
+            return self._load_with_members(files)
 
-                loader = _open_zarr
-            else:
-                files = [self.files]
+        if self.ens_size is None:
+            print(
+                "Warning: ens_size not set, "
+                "defaulting to deterministic loading."
+            )
 
-                for k, v in DEFAULTS_NETCDF.items():
-                    kwargs[k] = self.kwargs.get(k, v)
+        return self._load_deterministic(files)
 
-                loader = _open_mf_dataset
-        else:
-            files = self.files
-            if Path(files[0]).suffix.lower() == ".zarr":
-                for k, v in DEFAULTS_ZARR.items():
-                    kwargs[k] = self.kwargs.get(k, v)
-                kwargs["engine"] = "zarr"
+    def _load_deterministic(self, files):
+        """Load forecast data without a member dimension."""
 
-            else:
-                for k, v in DEFAULTS_NETCDF.items():
-                    kwargs[k] = self.kwargs.get(k, v)
+        with xr.open_dataset(files[0]) as first_ds:
+            times = first_ds["time"].values
 
-            loader = _open_mf_dataset
+        lead_times = times - times[0]
 
-        ds = loader(files, **kwargs)
-        return ds
+        kwargs = {
+            **DEFAULTS,
+            **self.kwargs,
+        }
+
+        ds = xr.open_mfdataset(
+            files,
+            preprocess=_preprocess_deterministic,
+            **kwargs
+        )
+
+        ds_out = (
+            ds
+            .assign_coords({
+                "lead_time": ("time", lead_times)
+            })
+            .rename_dims({
+                "values": "grid_index"
+            })
+            .swap_dims({
+                "time": "lead_time"
+            })
+            .chunk({
+                "grid_index": -1
+            })
+        )
 
 
-def _open_mf_dataset(files, **kwargs):
+    def _load_with_members(self, files):
+        """Load ensemble forecast data with a member dimension."""
 
-    times = xr.open_dataset(files[0], engine=kwargs["engine"], chunks=kwargs["chunks"])[
-        "time"
-    ].values
-    lead_times = times - times[0]
+        engine = self.kwargs.get(
+            "engine",
+            DEFAULTS["engine"]
+        )
 
-    ds = xr.open_mfdataset(files, preprocess=_preprocess, **kwargs)
+        if len(files) % self.ens_size != 0:
+            raise ValueError(
+                f"Number of files ({len(files)}) must be divisible "
+                f"by ens_size ({self.ens_size})."
+            )
+
+        with xr.open_dataset(
+            files[0],
+            engine=engine
+        ) as first_ds:
+            times = first_ds["time"].values
+
+        lead_times = times - times[0]
+
+        batches = [
+            files[i:i + self.ens_size]
+            for i in range(
+                0,
+                len(files),
+                self.ens_size
+            )
+        ]
+
+        ref_datasets = []
+
+        for batch in batches:
+
+            member_datasets = []
+
+            for member_idx, filepath in enumerate(batch):
+
+                ds = xr.open_dataset(
+                    filepath,
+                    engine=engine,
+                    chunks={}
+                )
+
+                ds = _preprocess_with_member(
+                    ds,
+                    member_idx
+                )
+
+                member_datasets.append(ds)
+
+            ref_ds = xr.concat(
+                member_datasets,
+                dim="member"
+            )
+
+            ref_datasets.append(ref_ds)
+
+        ds = xr.concat(
+            ref_datasets,
+            dim="reference_time"
+        )
+
+        ds_out = (
+            ds
+            .assign_coords({
+                "lead_time": ("time", lead_times)
+            })
+            .rename_dims({
+                "values": "grid_index"
+            })
+            .swap_dims({
+                "time": "lead_time"
+            })
+            .chunk({
+                "member": -1,
+                "grid_index": -1,
+                "lead_time": 1
+            })
+        )
+
+        return ds_out
+
+
+def _preprocess_deterministic(ds):
+    """Preprocess a single forecast file without member dimension."""
 
     ds_out = (
-        ds.assign_coords({"lead_time": ("time", lead_times)})
-        .rename_dims({"values": "grid_index"})
-        .swap_dims({"time": "lead_time"})
-    )
-
-    return ds_out
-
-
-def _open_zarr(files, **kwargs):
-
-    ds = xr.open_zarr(files, **kwargs)
-    times = ds["time"].values
-    lead_times = times - times[0]
-
-    ds_out = _preprocess(ds)
-
-    ds_out = (
-        ds_out.assign_coords({"lead_time": ("time", lead_times)})
-        .rename_dims({"values": "grid_index"})
-        .swap_dims({"time": "lead_time"})
-    )
-
-    return ds_out
-
-
-def _preprocess(ds):
-    ds_out = (
-        ds.set_coords(["longitude", "latitude"])
+        ds
+        .set_coords(["longitude", "latitude"])
         .expand_dims("reference_time")
-        .assign_coords({"reference_time": ("reference_time", [ds["time"].values[0]])})
+        .assign_coords({
+            "reference_time": (
+                "reference_time",
+                [ds["time"].values[0]]
+            )
+        })
         .drop_vars("time")
     )
+
+    return ds_out
+
+
+def _preprocess_with_member(ds, member_idx):
+    """Preprocess a forecast file and add its ensemble member."""
+
+    ds_out = (
+        ds
+        .set_coords(["longitude", "latitude"])
+        .expand_dims("reference_time")
+        .assign_coords({
+            "reference_time": (
+                "reference_time",
+                [ds["time"].values[0]]
+            )
+        })
+        .expand_dims("member")
+        .assign_coords({
+            "member": (
+                "member",
+                [member_idx]
+            )
+        })
+        .drop_vars("time")
+    )
+
+    return ds_out
+
+
+def _preprocess_deterministic(ds):
+    """Preprocess a single forecast file without member dimension."""
+    ds_out = ds.\
+        set_coords(["longitude", "latitude"]).\
+        expand_dims("reference_time").\
+        assign_coords(
+            {"reference_time": ("reference_time", [ds["time"].values[0]])}
+        ).\
+        drop_vars("time")
+    
+    return ds_out
+
+
+def _preprocess_with_member(ds, member_idx):
+    """Preprocess and add member dimension with explicit member index."""
+    ds_out = ds.\
+        set_coords(["longitude", "latitude"]).\
+        expand_dims("reference_time").\
+        assign_coords(
+            {"reference_time": ("reference_time", [ds["time"].values[0]])}
+        ).\
+        expand_dims("member").\
+        assign_coords({"member": ("member", [member_idx])}).\
+        drop_vars("time")
 
     return ds_out
