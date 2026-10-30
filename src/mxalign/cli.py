@@ -45,7 +45,7 @@ def run_slurm(args):
         queue = args.queue,
         account = args.account,
         cores = args.cores,
-        #processes = args.processes,
+        processes = True,
         interface = "ib0",
         memory = args.memory,
         job_extra_directives = ["--qos=normal"],

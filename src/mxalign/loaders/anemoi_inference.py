@@ -110,6 +110,8 @@ class AnemoiInferenceLoader(BaseLoader):
             })
         )
 
+        return ds_out
+
 
     def _load_with_members(self, files):
         """Load ensemble forecast data with a member dimension."""

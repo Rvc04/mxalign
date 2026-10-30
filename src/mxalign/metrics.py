@@ -1,7 +1,11 @@
+import logging
 import numpy as np
 import xarray as xr
 from scipy.fft import dctn
 from scores.processing import binary_discretise
+
+
+logger = logging.getLogger(__name__)
 
 
 def _build_thresholds(threshold_min, threshold_max, threshold_by):

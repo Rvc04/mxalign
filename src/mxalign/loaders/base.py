@@ -44,7 +44,12 @@ class BaseLoader(ABC):
     def _load(self): ...
 
     def _select_variables(self, ds):
-        return ds[self.variables]
+        try:
+            return ds[self.variables]
+        except KeyError as e:
+            logger.error("Invalid variable selected: %s", e)
+            logger.error("Available variables: %s", list(ds.data_vars))
+            raise
 
     def _add_grid_mapping(self, ds):
         ds = ds.space.add_crs(self.grid_mapping)
