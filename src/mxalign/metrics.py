@@ -342,9 +342,9 @@ def spread_skill(observations, forecasts, dim, member_dim="member", skipna=True,
     Returns
     -------
     xr.Dataset
-        For each variable a DataArray with a ``curve`` dimension
-        (values: ``["spread", "rmse"]``) and remaining dims (typically
-        ``lead_time``).
+        For each variable, a DataArray with a ``curve``
+        dimension containing:
+        ["spread", "rmse", "ratio"].
     """
     if spread_method not in ("rms", "mean_std"):
         raise ValueError(
@@ -390,10 +390,11 @@ def spread_skill(observations, forecasts, dim, member_dim="member", skipna=True,
         else:  # "mean_std"
             spread = np.sqrt(ens_var).mean(dim=dim_list, skipna=skipna)
         rmse = np.sqrt(((ens_mean - obs_v) ** 2).mean(dim=dim_list, skipna=skipna))
+        ratio = xr.where(rmse != 0, spread / rmse, np.nan)
 
         per_var[var] = xr.concat(
-            [spread, rmse],
-            dim=xr.Variable("curve", ["spread", "rmse"])
+            [spread, rmse, ratio],
+            dim=xr.Variable("curve", ["spread", "rmse", "ratio"])
         ).compute()
 
     return xr.Dataset(per_var)
@@ -766,7 +767,7 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
         if np.any(np.isnan(field_2d)):
             return None
         P = np.abs(dctn(field_2d, type=2, norm='ortho')) ** 2
-        
+
         sums = np.bincount(digitized, weights=P.ravel(), minlength=_n_bins + 2)[1:_n_bins + 1]
         with np.errstate(invalid="ignore", divide="ignore"):
             return np.where(bin_counts > 0, sums / bin_counts, 0.0).astype(np.float32)
