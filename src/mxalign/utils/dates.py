@@ -53,8 +53,8 @@ class Dates:
                 allow_extra=True
             )
         return sorted(paths)
-       
-        
+
+
 def to_timedelta64(freq: str) -> np.timedelta64:
     """
     Convert a frequency string to a numpy timedelta64 object.
@@ -73,7 +73,7 @@ def to_timedelta64(freq: str) -> np.timedelta64:
     ----------
     freq : str
         The frequency string to convert.
-    
+
     Returns
     -------
     np.timedelta64
@@ -81,4 +81,4 @@ def to_timedelta64(freq: str) -> np.timedelta64:
     """
     value = freq[:-1]
     unit = freq[-1]
-    return np.timedelta64(value,unit)
+    return np.timedelta64(value, unit)

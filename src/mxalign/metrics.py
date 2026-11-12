@@ -1,7 +1,11 @@
+import logging
 import numpy as np
 import xarray as xr
 from scipy.fft import dctn
 from scores.processing import binary_discretise
+
+
+logger = logging.getLogger(__name__)
 
 
 def _build_thresholds(threshold_min, threshold_max, threshold_by):
@@ -689,9 +693,18 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
                    variables=None, n_bins=None, compute_obs=True, compute_fct=True, ref_time_chunk=50):
     """2D isotropic power spectrum, one curve per (reference_time, lead_time).
 
-    Follows the DCTPowerSpectrum approach: physical wavenumbers in rad/m,
-    uniform linear binning via np.digitize, per-bin mean of DCT-II power.
-    Ensemble members (``member`` dim) are averaged over if present.
+    Bins are restricted to the inscribed-circle wavenumber (k_max = min(kx.max(), ky.max())),
+    i.e. the largest radius in wavenumber space with full 360-degree sample coverage.
+    This excludes the anisotropic corner region of the square DCT wavenumber grid, where
+    a shell only intersects a narrow angular range (biased toward the diagonal) rather than
+    a full circle. Bin-center wavenumbers are the sample-count-weighted mean k of the points
+    actually assigned to each bin, not the geometric bin-edge midpoint.
+
+    Resulting bounds (for dx=dy=res):
+      k_max  -> lambda_min ~ 2*res              (standard Nyquist wavelength)
+      k_min  (first bin centroid) -> lambda_max ~ 2*L, L = min(dim_x,dim_y)*res
+                (DCT fundamental mode = half-cosine spanning the domain; expected for DCT,
+                 not an FFT-style 2*pi/L fundamental)
 
     Parameters
     ----------
@@ -700,19 +713,17 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
         (plus optional ``member`` dim for ensemble forecasts).
         ``len(grid_index)`` must equal ``dim_x * dim_y``.
     dim_x, dim_y : int
-        Shape of the 2-D grid (rows × columns).
+        Shape of the 2-D grid (rows x columns).
     res : float
         Grid spacing in **metres** (uniform, dx = dy = res).
     variables : list of str, optional
-        Subset of variables to process.  All data_vars of ``forecasts`` are used if None.
+        Subset of variables to process. All data_vars of ``forecasts`` are used if None.
     n_bins : int, optional
-        Number of wavenumber bins.  Defaults to ``min(dim_x, dim_y) // 2``.
+        Number of wavenumber bins. Defaults to ``min(dim_x, dim_y) // 2``.
     compute_obs : bool
         If False, skip the observations spectrum (``{var}_obs``).
     compute_fct : bool
         If False, skip the forecast spectrum (``{var}_fct``).
-        Use ``compute_obs=True, compute_fct=False`` when the dataset of interest
-        is the reference (e.g. computing the reanalysis spectrum standalone).
     ref_time_chunk : int
         Number of reference times loaded per ``.load()`` call (default: 50).
 
@@ -721,7 +732,7 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
     xr.Dataset
         ``{var}_fct`` for each variable (plus ``{var}_obs`` if ``compute_obs=True``),
         with dimensions ``(reference_time, lead_time, k)``.
-        ``k`` is the bin-centre wavenumber in rad/m.
+        ``k`` is the bin-centroid wavenumber in rad/m.
     """
     if variables is not None:
         if compute_obs:
@@ -735,7 +746,10 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
     ky = np.pi * np.arange(dim_y) / (dim_y * dy)
     KX, KY    = np.meshgrid(kx, ky, indexing='ij')
     k         = np.sqrt(KX ** 2 + KY ** 2)
-    k_max     = k.max()
+
+    # Inscribed-circle Nyquist: largest k with full angular coverage. Using k.max()
+    # (the square's corner) instead would include anisotropically-sampled high-k bins.
+    k_max     = min(kx.max(), ky.max())
     _n_bins   = n_bins if n_bins is not None else min(dim_x, dim_y) // 2
     k_edges   = np.linspace(0.0, k_max, _n_bins + 1)
     k_centers = 0.5 * (k_edges[1:] + k_edges[:-1])
@@ -745,15 +759,18 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
     # bin i in 1.._n_bins, empty bins -> 0.0; k == k_max lands in bin _n_bins+1, unused.
     bin_counts = np.bincount(digitized, minlength=_n_bins + 2)[1:_n_bins + 1]
 
+
     def _field_spectrum(field_1d):
         """Isotropic power spectrum of a single 1-D field (grid_index order)."""
         field_2d = field_1d.reshape(dim_x, dim_y)
         if np.any(np.isnan(field_2d)):
             return None
         P = np.abs(dctn(field_2d, type=2, norm='ortho')) ** 2
+        
         sums = np.bincount(digitized, weights=P.ravel(), minlength=_n_bins + 2)[1:_n_bins + 1]
         with np.errstate(invalid="ignore", divide="ignore"):
             return np.where(bin_counts > 0, sums / bin_counts, 0.0).astype(np.float32)
+
 
     def _spectrum(da):
         lead_times = da.lead_time.values
@@ -764,10 +781,8 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
         members    = da.member.values if has_member else None
         n_mbr      = len(members) if has_member else 1
 
-        # Identify the spatial dim (everything that is not a time or member dim)
         grid_dim = next(d for d in da.dims if d not in ("reference_time", "lead_time", "member"))
 
-        # Normalise dim order so numpy indexing is predictable
         if has_member:
             da = da.transpose("reference_time", "lead_time", grid_dim, "member")
             out = np.full((n_rt, n_lt, n_mbr, _n_bins), np.nan, dtype=np.float32)
@@ -780,7 +795,6 @@ def power_spectrum(observations, forecasts, dim_x, dim_y, res,
             for t_start in range(0, n_rt, ref_time_chunk):
                 t_end = min(t_start + ref_time_chunk, n_rt)
                 chunk = da_lt.isel(reference_time=slice(t_start, t_end)).load().values
-                # chunk shape: (t_chunk, grid) or (t_chunk, grid, member)
                 if chunk.ndim == 1:
                     chunk = chunk[np.newaxis, :]
                 for t in range(chunk.shape[0]):

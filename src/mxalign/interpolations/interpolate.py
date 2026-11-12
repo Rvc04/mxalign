@@ -1,10 +1,11 @@
 from .registry import get_interpolation
 
+
 def interpolate(source_datasets, target_dataset, method, **kwargs):
     interp_cls = get_interpolation(method)
     interpolator = interp_cls(target_dataset, **kwargs)
 
-    if isinstance(source_datasets,dict):
+    if isinstance(source_datasets, dict):
         keys = list(source_datasets.keys())
         datasets = list(source_datasets.values())
     else:

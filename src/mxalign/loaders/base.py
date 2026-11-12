@@ -3,7 +3,8 @@ from abc import ABC, abstractmethod
 from .registry import register_loader
 from ..properties.properties import Properties, Space, Time, Uncertainty
 from ..properties.validation import validate_dataset
-from ..properties.utils import properties_to_attrs
+from ..properties.utils import set_properties_attrs
+
 
 class BaseLoader(ABC):
     """Base class for all loaders."""
@@ -16,7 +17,7 @@ class BaseLoader(ABC):
 
     def __init__(self, files, variables=None, grid_mapping=None, **kwargs):
         self.files = files
-        self.variables = [variables] if isinstance(variables,str) else variables
+        self.variables = [variables] if isinstance(variables, str) else variables
         self.grid_mapping = grid_mapping
         self.kwargs = kwargs
 
@@ -28,7 +29,7 @@ class BaseLoader(ABC):
         properties = self._get_properties(ds)
         validate_dataset(ds, properties)
 
-        ds.attrs["properties"] = properties_to_attrs(properties)
+        ds = set_properties_attrs(ds, properties)
 
         if self.grid_mapping:
             ds = self._add_grid_mapping(ds)
@@ -38,14 +39,18 @@ class BaseLoader(ABC):
             ds[coord] = ds[coord].compute()
 
         return ds
-    
+
     @abstractmethod
-    def _load(self):
-        ...
-    
+    def _load(self): ...
+
     def _select_variables(self, ds):
-        return ds[self.variables]
-    
+        try:
+            return ds[self.variables]
+        except KeyError as e:
+            logger.error("Invalid variable selected: %s", e)
+            logger.error("Available variables: %s", list(ds.data_vars))
+            raise
+
     def _add_grid_mapping(self, ds):
         ds = ds.space.add_crs(self.grid_mapping)
         ds = ds.space.add_grid_mapping(self.grid_mapping)
@@ -53,9 +58,7 @@ class BaseLoader(ABC):
 
     def _get_properties(self, ds):
         properties = Properties(
-            space=self.space,
-            time=self.time,
-            uncertainty=self.uncertainty
+            space=self.space, time=self.time, uncertainty=self.uncertainty
         )
         return properties
 
@@ -72,10 +75,12 @@ class MxAlignLoader(BaseLoader):
         import xarray as xr
 
         files = [self.files] if isinstance(self.files, str) else self.files
-        
-        ds = xr.open_mfdataset(files, chunks="auto", **self.kwargs) 
+
+        ds = xr.open_mfdataset(files, chunks="auto", **self.kwargs)
         if "code" in ds.dims:
-            ds = ds.rename_dims({"code":"point_index"}).transpose("valid_time","point_index")
+            ds = ds.rename_dims({"code": "point_index"}).transpose(
+                "valid_time", "point_index"
+            )
         return ds
 
     def _get_properties(self, ds):
@@ -85,14 +90,14 @@ class MxAlignLoader(BaseLoader):
             time = Time.OBSERVATION
         else:
             raise ValueError("Unknown temporal dimensions")
-        
+
         if "grid_index" in ds.dims or "xc" in ds.dims or "latitude" in ds.dims:
             space = Space.GRID
         elif "point_index" in ds.dims:
             space = Space.POINT
         else:
-            raise ValueError("Unknow spatial dimensions")
-        
+            raise ValueError("Unknown spatial dimensions")
+
         if "member" in ds.dims:
             uncertainty = Uncertainty.ENSEMBLE
         elif "quantile" in ds.dims:
@@ -100,8 +105,4 @@ class MxAlignLoader(BaseLoader):
         else:
             uncertainty = Uncertainty.DETERMINISTIC
 
-        return Properties(
-            space=space,
-            time=time,
-            uncertainty=uncertainty
-        )
+        return Properties(space=space, time=time, uncertainty=uncertainty)

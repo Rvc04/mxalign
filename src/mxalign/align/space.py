@@ -1,7 +1,5 @@
 import xarray as xr
 
-from ..properties.properties import Properties, Time, Space, Uncertainty
-from ..properties.utils import properties_to_attrs
 
 def align_space(datasets, reference, **kwargs):
     if isinstance(datasets, (xr.Dataset, xr.DataArray)):
