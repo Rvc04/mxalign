@@ -302,10 +302,8 @@ def spread_skill(observations, forecasts, dim, member_dim="member", skipna=True,
         =>  spread / rmse  ->  sqrt(M / (M + 1))     ( 0.91 at M=5,
                                                        0.98 at M=31 )
 
-    This function returns the **raw** spread and rmse; it does not apply the
-    finite-``M`` inflation.  For a single "1.0 == calibrated" line that is
-    comparable across ensemble sizes, multiply spread by ``sqrt((M+1)/M)``
-    (or divide rmse by it) in the plotting/interpretation layer.
+    This function returns the corrected spread and rmse; by applying the correction
+    factor: ``sqrt((M+1)/M)`` for finite-``M`` inflation.
 
     Parameters
     ----------
@@ -389,6 +387,11 @@ def spread_skill(observations, forecasts, dim, member_dim="member", skipna=True,
             spread = np.sqrt(ens_var.mean(dim=dim_list, skipna=skipna))
         else:  # "mean_std"
             spread = np.sqrt(ens_var).mean(dim=dim_list, skipna=skipna)
+        # finite-ensemble-size inflation correction for the spread
+        M = forecasts.sizes[member_dim]
+        correction_factor = np.sqrt((M + 1) / M)
+        
+        spread = correction_factor * spread
         rmse = np.sqrt(((ens_mean - obs_v) ** 2).mean(dim=dim_list, skipna=skipna))
         ratio = xr.where(rmse != 0, spread / rmse, np.nan)
 
